@@ -52,6 +52,9 @@ public:
     PinholeCameraIntrinsic intrinsic_;
     /// Camera extrinsic parameters.
     Eigen::Matrix4d_u extrinsic_;
+
+    std::vector<PinholeCameraIntrinsic> multicam_intrinsic_;
+    std::vector<Eigen::Matrix4d_u> multicam_lidar2cam_;
 };
 }  // namespace camera
 }  // namespace open3d

@@ -89,6 +89,51 @@ static void ComputeJacobianAndResidualRigid(
     w = 1.0;  // Dummy.
 }
 
+static void ComputeJacobianAndResidualRigidMultiCam(
+        int row,
+        Eigen::Vector6d& J_r,
+        double& r,
+        double& w, 
+        const geometry::TriangleMesh& mesh,
+        const std::vector<double>& proxy_intensity,
+        const geometry::Image& images_gray,
+        const geometry::Image& images_dx,
+        const geometry::Image& images_dy,
+        const Eigen::Matrix4d& intrinsic,
+        const Eigen::Matrix4d& extrinsic,
+        const Eigen::Matrix4d& lidar2cam,
+        const std::vector<int>& visibility_image_to_vertex,
+        const int image_boundary_margin) {
+    J_r.setZero();
+    r = 0;
+    int vid = visibility_image_to_vertex[row];
+    Eigen::Vector3d x = mesh.vertices_[vid];
+    Eigen::Vector4d g = lidar2cam * extrinsic * Eigen::Vector4d(x(0), x(1), x(2), 1);
+    Eigen::Vector4d uv = intrinsic * g;
+    double u = uv(0) / uv(2);
+    double v = uv(1) / uv(2);
+    if (!images_gray.TestImageBoundary(u, v, image_boundary_margin)) return;
+    bool valid;
+    double gray, dIdx, dIdy;
+    std::tie(valid, gray) = images_gray.FloatValueAt(u, v);
+    std::tie(valid, dIdx) = images_dx.FloatValueAt(u, v);
+    std::tie(valid, dIdy) = images_dy.FloatValueAt(u, v);
+    if (gray == -1.0) return;
+    double invz = 1. / g(2);
+    double v0 = dIdx * intrinsic(0, 0) * invz;
+    double v1 = dIdy * intrinsic(1, 1) * invz;
+    double v2 = -(v0 * g(0) + v1 * g(1)) * invz;
+    J_r(0) = (-g(2) * v1 + g(1) * v2);
+    J_r(1) = (g(2) * v0 - g(0) * v2);
+    J_r(2) = (-g(1) * v0 + g(0) * v1);
+    J_r(3) = v0;
+    J_r(4) = v1;
+    J_r(5) = v2;
+    r = (gray - proxy_intensity[vid]);
+    w = 1.0;  // Dummy.
+
+}
+
 std::pair<geometry::TriangleMesh, camera::PinholeCameraTrajectory>
 RunRigidOptimizer(const geometry::TriangleMesh& mesh,
                   const std::vector<geometry::RGBDImage>& images_rgbd,
@@ -247,6 +292,114 @@ RunRigidOptimizer(const geometry::TriangleMesh& mesh,
                             option.invisible_vertex_color_knn_);
 
     return std::make_pair(opt_mesh, opt_camera_trajectory);
+}
+
+std::pair<geometry::TriangleMesh, camera::PinholeCameraTrajectory>
+RunRigidOptimizerMultiCam(const geometry::TriangleMesh& mesh,
+                  const std::vector<std::vector<geometry::RGBDImage>>& images_rgbd,
+                  const camera::PinholeCameraTrajectory& camera_trajectory,
+                  const RigidOptimizerOption& option) {
+    // The following properties will change during optimization.
+    geometry::TriangleMesh opt_mesh = mesh;
+    camera::PinholeCameraTrajectory opt_camera_trajectory = camera_trajectory;
+
+    // The following properties remain unchanged during optimization.
+    std::vector<std::vector<geometry::Image>> vimages_gray;
+    std::vector<std::vector<geometry::Image>> vimages_dx;
+    std::vector<std::vector<geometry::Image>> vimages_dy;
+    std::vector<std::vector<geometry::Image>> vimages_color;
+    std::vector<std::vector<geometry::Image>> vimages_depth;
+    std::vector<std::vector<geometry::Image>> vimages_mask;
+    std::vector< std::vector<std::pair<int, std::vector<int> >> > visibility_vertex_to_image;
+    std::vector<std::vector<std::vector<int>>> visibility_image_to_vertex;
+
+    utility::LogDebug("[ColorMapOptimization] CreateUtilImagesFromRGBD");
+    std::tie(vimages_gray, vimages_dx, vimages_dy, vimages_color, vimages_depth) =
+            CreateUtilImagesFromRGBDMultiCam(images_rgbd);
+
+    utility::LogDebug("[ColorMapOptimization] CreateDepthBoundaryMasks");
+    vimages_mask = CreateDepthBoundaryMasksMultiCam(
+            vimages_depth, option.depth_threshold_for_discontinuity_check_,
+            option.half_dilation_kernel_size_for_discontinuity_map_);
+
+    utility::LogDebug("[ColorMapOptimization] CreateVertexAndImageVisibility");
+    std::tie(visibility_image_to_vertex, visibility_vertex_to_image) =
+            CreateVertexAndImageVisibilityMultiCam(
+                    opt_mesh, vimages_depth, vimages_mask, opt_camera_trajectory,
+                    option.maximum_allowable_depth_,
+                    option.depth_threshold_for_visibility_check_);
+
+    utility::LogDebug("[ColorMapOptimization] Rigid Optimization");
+    std::vector<double> proxy_intensity;
+    int total_num_ = 0;
+    int n_camera = int(opt_camera_trajectory.parameters_.size());
+    SetProxyIntensityForVertexMultiCam(opt_mesh, vimages_gray, utility::nullopt,
+                               opt_camera_trajectory,
+                               visibility_vertex_to_image, proxy_intensity,
+                               option.image_boundary_margin_);
+
+  // begin optimation
+  int n_cams = 0;
+  if(n_camera != 0) n_cams = images_rgbd[0].size();
+  for(int itr = 0; itr < option.maximum_iteration_; itr++) {
+    utility::LogDebug("[Iteration {:04d}] ", itr + 1);
+    double residual = 0.0;
+    total_num_ = 0;
+    std::vector<Eigen::Matrix6d> multicam_JTJ(n_cams, Eigen::Matrix6d::Zero());
+    std::vector<Eigen::Vector6d> multicam_JTr(n_cams, Eigen::Vector6d::Zero());
+    std::vector<double> multicam_r2(n_cams,0);
+    std::vector<Eigen::Matrix4d> multicam_lidar2cam(n_cams, Eigen::Matrix4d::Identity());
+    multicam_lidar2cam = opt_camera_trajectory.parameters_[0].multicam_lidar2cam_;
+#pragma omp parallel for schedule(static) \
+    num_threads(utility::EstimateMaxThreads())
+    for(int poseId = 0; poseId < n_camera; poseId++) {
+      for(int camId = 0; camId < n_cams; camId++) {
+        auto intrinsic = opt_camera_trajectory.parameters_[poseId].multicam_intrinsic_[camId];
+        auto extrinsic = opt_camera_trajectory.parameters_[poseId].extrinsic_;
+        auto lidar2cam = opt_camera_trajectory.parameters_[poseId].multicam_lidar2cam_[camId];
+        Eigen::Matrix4d intr = Eigen::Matrix4d::Zero();
+        intr.block<3, 3>(0, 0) = intrinsic;
+        intr(3, 3) = 1.0;
+        auto f_lambda = [&](int i, Eigen::Vector6d& J_r, double& r,
+                            double& w) {
+            w = 1.0;  // Dummy.
+            ComputeJacobianAndResidualRigidMultiCam(
+                    i, J_r, r, w, opt_mesh, proxy_intensity, images_gray[poseId][camId],
+                    images_dx[poseId][camId], images_dy[poseId][camId], intr, extrinsic, lidar2cam,
+                    visibility_image_to_vertex[poseId][camId],
+                    option.image_boundary_margin_);
+        };
+        Eigen::Matrix6d JTJ;
+        Eigen::Vector6d JTr;
+        double r2;
+        std::tie(JTJ, JTr, r2) = 
+          utility::ComputeJTJandJTr<Eigen::Matrix6d, Eigen::Vector6d>(
+            f_lambda, int(visibility_image_to_vertex[poseId][camId].size()),
+            false
+          );
+        multicam_JTJ[camId] += JTJ;
+        multicam_JTr[camId] += JTr;
+        multicam_r2[camId] += r2;
+      } // iter multicam
+    } // iter all pose
+
+    // Solve Jacobin
+    for(int camId = 0; camId < n_cams; camId++) {
+      bool is_success;
+      Eigen::Matrix4d delta;
+      std::tie(is_success, delta) = 
+        utility::SolveJacobianSystemAndObtainExtrinsicMatrix(multicam_JTJ[camId],
+                                                             multicam_JTr[camId]);
+      multicam_lidar2cam[camId] = delta * multicam_lidar2cam[camId];
+    }
+
+    // update multicam_lidar2cam_
+    for(int c = 0; c < n_camera; c++) {
+      opt_camera_trajectory.parameters_[c].multicam_lidar2cam_ = multicam_lidar2cam;
+    }
+  } // iternum
+
+  return std::make_pair(opt_mesh, opt_camera_trajectory);
 }
 
 }  // namespace color_map

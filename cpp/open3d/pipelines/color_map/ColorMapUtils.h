@@ -48,8 +48,20 @@ std::tuple<std::vector<geometry::Image>,
            std::vector<geometry::Image>>
 CreateUtilImagesFromRGBD(const std::vector<geometry::RGBDImage>& images_rgbd);
 
+std::tuple<std::vector<std::vector<geometry::Image>>,
+           std::vector<std::vector<geometry::Image>>,
+           std::vector<std::vector<geometry::Image>>,
+           std::vector<std::vector<geometry::Image>>,
+           std::vector<std::vector<geometry::Image>> >
+CreateUtilImagesFromRGBDMultiCam(const std::vector<std::vector<geometry::RGBDImage>>& images_rgbds);
+
 std::vector<geometry::Image> CreateDepthBoundaryMasks(
         const std::vector<geometry::Image>& images_depth,
+        double depth_threshold_for_discontinuity_check,
+        int half_dilation_kernel_size_for_discontinuity_map);
+
+std::vector<std::vector<geometry::Image>> CreateDepthBoundaryMasksMultiCam(
+        const std::vector<std::vector<geometry::Image>>& vimages_depth,
         double depth_threshold_for_discontinuity_check,
         int half_dilation_kernel_size_for_discontinuity_map);
 
@@ -62,12 +74,30 @@ CreateVertexAndImageVisibility(
         double maximum_allowable_depth,
         double depth_threshold_for_visibility_check);
 
+std::tuple<std::vector<std::vector<std::vector<int>>>, std::vector< std::vector<std::pair<int, std::vector<int> >> > >
+CreateVertexAndImageVisibilityMultiCam(
+        const geometry::TriangleMesh& mesh,
+        const std::vector<std::vector<geometry::Image>>& images_depth,
+        const std::vector<std::vector<geometry::Image>>& images_mask,
+        const camera::PinholeCameraTrajectory& camera_trajectory,
+        double maximum_allowable_depth,
+        double depth_threshold_for_visibility_check);
+
 void SetProxyIntensityForVertex(
         const geometry::TriangleMesh& mesh,
         const std::vector<geometry::Image>& images_gray,
         const utility::optional<std::vector<ImageWarpingField>>& warping_fields,
         const camera::PinholeCameraTrajectory& camera_trajectory,
         const std::vector<std::vector<int>>& visibility_vertex_to_image,
+        std::vector<double>& proxy_intensity,
+        int image_boundary_margin);
+
+void SetProxyIntensityForVertexMultiCam(
+        const geometry::TriangleMesh& mesh,
+        const std::vector<std::vector<geometry::Image>>& images_gray,
+        const utility::optional<std::vector<ImageWarpingField>>& warping_fields,
+        const camera::PinholeCameraTrajectory& camera_trajectory,
+        const std::vector< std::vector<std::pair<int, std::vector<int> >> >& visibility_vertex_to_image,
         std::vector<double>& proxy_intensity,
         int image_boundary_margin);
 

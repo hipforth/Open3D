@@ -52,6 +52,21 @@ static std::tuple<float, float, float> Project3DPointAndGetUVDepth(
     return std::make_tuple(u, v, z);
 }
 
+static std::tuple<float, float, float> Project3DPointAndGetUVDepthMultiCam(
+        const Eigen::Vector3d X,
+        const int camId,
+        const camera::PinholeCameraParameters& camera_parameter) {
+    std::pair<double, double> f = camera_parameter.multicam_intrinsic_[camId].GetFocalLength();
+    std::pair<double, double> p =
+            camera_parameter.multicam_intrinsic_[camId].GetPrincipalPoint();
+    Eigen::Vector4d Vt =
+            camera_parameter.multicam_lidar2cam_[camId] * camera_parameter.extrinsic_ * Eigen::Vector4d(X(0), X(1), X(2), 1);
+    float u = float((Vt(0) * f.first) / Vt(2) + p.first);
+    float v = float((Vt(1) * f.second) / Vt(2) + p.second);
+    float z = float(Vt(2));
+    return std::make_tuple(u, v, z);
+}
+
 template <typename T>
 static std::tuple<bool, T> QueryImageIntensity(
         const geometry::Image& img,
@@ -118,6 +133,51 @@ CreateUtilImagesFromRGBD(const std::vector<geometry::RGBDImage>& images_rgbd) {
                            images_depth);
 }
 
+std::tuple<std::vector<std::vector<geometry::Image>>,
+           std::vector<std::vector<geometry::Image>>,
+           std::vector<std::vector<geometry::Image>>,
+           std::vector<std::vector<geometry::Image>>,
+           std::vector<std::vector<geometry::Image>> >
+CreateUtilImagesFromRGBDMultiCam(const std::vector<std::vector<geometry::RGBDImage>>& images_rgbds) {
+    std::vector<std::vector<geometry::Image>> vimages_gray;
+    std::vector<std::vector<geometry::Image>> vimages_dx;
+    std::vector<std::vector<geometry::Image>> vimages_dy;
+    std::vector<std::vector<geometry::Image>> vimages_color;
+    std::vector<std::vector<geometry::Image>> vimages_depth;
+
+    for (size_t i = 0; i < images_rgbds.size(); i++) {
+      std::vector<geometry::Image> images_gray;
+      std::vector<geometry::Image> images_dx;
+      std::vector<geometry::Image> images_dy;
+      std::vector<geometry::Image> images_color;
+      std::vector<geometry::Image> images_depth;
+
+      for(int camId = 0; camId < 4; camId++) {
+        auto gray_image = images_rgbds[i][camId].color_.CreateFloatImage();
+        auto gray_image_filtered =
+                gray_image->Filter(geometry::Image::FilterType::Gaussian3);
+        images_gray.push_back(*gray_image_filtered);
+        images_dx.push_back(*gray_image_filtered->Filter(
+                geometry::Image::FilterType::Sobel3Dx));
+        images_dy.push_back(*gray_image_filtered->Filter(
+                geometry::Image::FilterType::Sobel3Dy));        
+        auto color = std::make_shared<geometry::Image>(images_rgbds[i][camId].color_);
+        auto depth = std::make_shared<geometry::Image>(images_rgbds[i][camId].depth_);
+        images_color.push_back(*color);
+        images_depth.push_back(*depth);
+      }
+
+      vimages_gray.push_back(images_gray);
+      vimages_dx.push_back(images_dx);
+      vimages_dy.push_back(images_dy);
+      vimages_color.push_back(images_color);
+      vimages_depth.push_back(images_depth);
+    }
+
+    return std::make_tuple(vimages_gray, vimages_dx, vimages_dy, vimages_color,
+                           vimages_depth);
+}
+
 std::vector<geometry::Image> CreateDepthBoundaryMasks(
         const std::vector<geometry::Image>& images_depth,
         double depth_threshold_for_discontinuity_check,
@@ -132,6 +192,28 @@ std::vector<geometry::Image> CreateDepthBoundaryMasks(
                 half_dilation_kernel_size_for_discontinuity_map));
     }
     return masks;
+}
+
+std::vector<std::vector<geometry::Image>> CreateDepthBoundaryMasksMultiCam(
+        const std::vector<std::vector<geometry::Image>>& vimages_depth,
+        double depth_threshold_for_discontinuity_check,
+        int half_dilation_kernel_size_for_discontinuity_map) {
+    auto n_images = vimages_depth.size();
+    size_t n_cams = 0;
+    if(n_images != 0) n_cams = vimages_depth[0].size();
+    std::vector<std::vector<geometry::Image>> vmasks;
+    for (size_t i = 0; i < n_images; i++) {
+      std::vector<geometry::Image> masks;
+      for(size_t camId = 0; camId < n_cams; camId++) {
+        utility::LogDebug("[MakeDepthMasks] geometry::Image {:d}/{:d}, camId {:d}", i,
+                        n_images, camId);
+        masks.push_back(*vimages_depth[i][camId].CreateDepthBoundaryMask(
+              depth_threshold_for_discontinuity_check,
+              half_dilation_kernel_size_for_discontinuity_map));
+      }
+      vmasks.push_back(masks);
+    }
+    return vmasks;
 }
 
 std::tuple<std::vector<std::vector<int>>, std::vector<std::vector<int>>>
@@ -201,6 +283,96 @@ CreateVertexAndImageVisibility(
                            visibility_image_to_vertex);
 }
 
+std::tuple<std::vector<std::vector<std::vector<int>>>, std::vector< std::vector<std::pair<int, std::vector<int> >> > >
+CreateVertexAndImageVisibilityMultiCam(
+        const geometry::TriangleMesh& mesh,
+        const std::vector<std::vector<geometry::Image>>& images_depth,
+        const std::vector<std::vector<geometry::Image>>& images_mask,
+        const camera::PinholeCameraTrajectory& camera_trajectory,
+        double maximum_allowable_depth,
+        double depth_threshold_for_visibility_check) {
+    size_t n_camera = camera_trajectory.parameters_.size();
+    size_t n_cams = 0;
+    if(n_camera != 0) n_cams = images_depth[0].size();
+    size_t n_vertex = mesh.vertices_.size();
+
+    // 这是一个三维数组，维度由顶点、位置和相机数目决定
+    // visibility_image_to_vertex[c][camId]: vertices visible by location c in camId.
+    // 第c个位置，第camId个相机所看到的顶点列表： std::vector<int>, 一个一维数组，由顶点序号组成
+    std::vector<std::vector<std::vector<int>>> visibility_image_to_vertex;
+    visibility_image_to_vertex.resize(n_camera);
+    // visibility_vertex_to_image[v]: cameras that can see vertex v.
+    // 第 v 个顶点所看到的相机, std::vector<std::pair<int, std::vector<int> >>， 一个一维数组，表示第v个顶点能看到第c个位置的多个camId个相机
+    // 比如第1个顶点，能看到第1个位置的2,3相机, 第3个位置的1,4相机
+    std::vector< std::vector<std::pair<int, std::vector<int> >> > visibility_vertex_to_image;
+    visibility_vertex_to_image.resize(n_vertex);
+
+#pragma omp parallel for schedule(static) \
+        num_threads(utility::EstimateMaxThreads())
+      for (int vertex_id = 0; vertex_id < int(n_vertex); vertex_id++) {
+        Eigen::Vector3d X = mesh.vertices_[vertex_id];
+        std::vector<std::pair<int, std::vector<int> >> vertex_id_to_images;
+        for (int camera_id = 0; camera_id < int(n_camera); camera_id++) {
+          std::pair<int, std::vector<int> > vertex_id_to_image;
+          for(int camId = 0; camId < int(n_cams); camId++) {
+          float u, v, d;
+          std::tie(u, v, d) = Project3DPointAndGetUVDepthMultiCam(
+                    X, camId, camera_trajectory.parameters_[camera_id]);
+          
+          int u_d = int(round(u));
+          int v_d = int(round(v));
+          // Skip if vertex in image boundary.
+          if (d < 0.0 ||
+              !images_depth[camera_id][camId].TestImageBoundary(u_d, v_d)) {
+              continue;
+          }
+
+          // Skip if vertex's depth is too large (e.g. background).
+          float d_sensor =
+                  *images_depth[camera_id][camId].PointerAt<float>(u_d, v_d);
+          if (d_sensor > maximum_allowable_depth) {
+              continue;
+          }
+
+          // Check depth boundary mask. If a vertex is located at the boundary
+          // of an object, its color will be highly diverse from different
+          // viewing angles.
+          if (*images_mask[camera_id][camId].PointerAt<uint8_t>(u_d, v_d) == 255) {
+              continue;
+          }
+
+          // Check depth errors.
+          if (std::fabs(d - d_sensor) >=
+              depth_threshold_for_visibility_check) {
+              continue;
+          }
+
+          visibility_image_to_vertex[camera_id][camId].push_back(vertex_id);
+#pragma omp critical(CreateVertexAndImageVisibility)
+          // std::vector<std::pair<int, std::vector<int> >>
+          vertex_id_to_image.second.push_back(camId);
+        } // multicam
+        vertex_id_to_image.first = camera_id;
+        vertex_id_to_images.push_back(vertex_id_to_image);
+      } // location
+      visibility_vertex_to_image.push_back(vertex_id_to_images);
+    } // vertex
+
+    for (int camera_id = 0; camera_id < int(n_camera); camera_id++) {
+      for(int camId = 0; camId < int(n_cams); camId++) {
+        size_t n_visible_vertex = visibility_image_to_vertex[camera_id][camID].size();
+        utility::LogDebug(
+                "[cam {:d}]: {:d}/{:d} ({:.5f}%) vertices are visible",
+                camera_id, n_visible_vertex, n_vertex,
+                double(n_visible_vertex) / n_vertex * 100);
+      }
+    }
+
+    return std::make_tuple(visibility_image_to_vertex,
+                           visibility_vertex_to_image
+                           );
+}
+
 void SetProxyIntensityForVertex(
         const geometry::TriangleMesh& mesh,
         const std::vector<geometry::Image>& images_gray,
@@ -243,6 +415,47 @@ void SetProxyIntensityForVertex(
             proxy_intensity[i] /= sum;
         }
     }
+}
+
+void SetProxyIntensityForVertexMultiCam(
+        const geometry::TriangleMesh& mesh,
+        const std::vector<std::vector<geometry::Image>>& images_gray,
+        const utility::optional<std::vector<ImageWarpingField>>& warping_fields,
+        const camera::PinholeCameraTrajectory& camera_trajectory,
+        const std::vector< std::vector<std::pair<int, std::vector<int> >> >& visibility_vertex_to_image,
+        std::vector<double>& proxy_intensity,
+        int image_boundary_margin) {
+    
+  auto n_vertex = mesh.vertices_.size();
+  proxy_intensity.resize(n_vertex);
+
+#pragma omp parallel for schedule(static) \
+        num_threads(utility::EstimateMaxThreads())
+  for (int i = 0; i < int(n_vertex); i++) {
+    proxy_intensity[i] = 0.0;
+    float sum = 0.0;
+    for(auto iter = visibility_vertex_to_image[i].begin(); iter != visibility_vertex_to_image.end(); iter++) {
+      const int pose_id = iter->first;
+      float gray;
+      bool valid = false;
+      for(auto iterCam = iter->second.begin(); iterCam != iter->second.end(); iterCam++) {
+        const int camId = *iterCam;
+        std::tie(valid, gray) = QueryImageIntensity<float>(
+          images_gray[pose_id][camId], utility::nullopt, mesh.vertices_[i],
+          camera_trajectory.parameters_[pose_id], utility::nullopt,
+          image_boundary_margin
+        );
+        if(valid) {
+          sum += 1.0;
+          proxy_intensity[i] += gray;
+        }
+      } // iter multi cam
+    } // iter all pose
+    if(sum > 0) {
+      proxy_intensity[i] /= sum;
+    }
+  } // iter all vertex
+
 }
 
 void SetGeometryColorAverage(

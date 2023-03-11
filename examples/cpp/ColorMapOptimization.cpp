@@ -30,6 +30,16 @@
 
 using namespace open3d;
 
+namespace io {
+
+void readCamLidarEx(const std::string& data_path, camera::PinholeCameraTrajectory& camera_trajectory) {
+	for(int camId = 0; camId < 4; camId++) {
+		const std::string camLidarEx_file = data_path + "/EX/lidar2cam.txt";
+	}
+}
+
+} // namespace io
+
 void PrintHelp() {
     using namespace open3d;
 
@@ -42,34 +52,42 @@ void PrintHelp() {
 }
 
 std::tuple<geometry::TriangleMesh,
-           std::vector<geometry::RGBDImage>,
+           std::vector<std::vector<geometry::RGBDImage>> ,
            camera::PinholeCameraTrajectory>
 PrepareDataset(const std::string& data_path) {
-    // Read RGBD images
-    std::vector<std::string> depth_filenames, color_filenames;
-    utility::filesystem::ListFilesInDirectoryWithExtension(
-            data_path + "/depth/", "png", depth_filenames);
-    utility::filesystem::ListFilesInDirectoryWithExtension(
-            data_path + "/image/", "jpg", color_filenames);
-    if (depth_filenames.size() != color_filenames.size()) {
-        utility::LogError(
-                "The number of depth images {} does not match the number of "
-                "color images {}.",
-                depth_filenames.size(), color_filenames.size());
-    }
-    std::sort(depth_filenames.begin(), depth_filenames.end());
-    std::sort(color_filenames.begin(), color_filenames.end());
 
-    std::vector<geometry::RGBDImage> rgbd_images;
-    for (size_t i = 0; i < depth_filenames.size(); i++) {
-        utility::LogDebug("reading {}...", depth_filenames[i]);
-        auto depth = io::CreateImageFromFile(depth_filenames[i]);
-        utility::LogDebug("reading {}...", color_filenames[i]);
-        auto color = io::CreateImageFromFile(color_filenames[i]);
-        auto rgbd_image = geometry::RGBDImage::CreateFromColorAndDepth(
-                *color, *depth, 1000.0, 3.0, false);
-        rgbd_images.push_back(*rgbd_image);
-    }
+	std::vector<std::vector<geometry::RGBDImage>> vvrgbd_image;
+	for(int camId = 0; camId < 4; camId++) {
+		const std::string camId_str = std::to_string(camId);
+		// Read RGBD images
+    	std::vector<std::string> depth_filenames, color_filenames;
+    	utility::filesystem::ListFilesInDirectoryWithExtension(
+    	        data_path + "/depth/" + camId_str + "/", "png", depth_filenames);
+    	utility::filesystem::ListFilesInDirectoryWithExtension(
+    	        data_path + "/image/" + camId_str + "/", "jpg", color_filenames);
+    	if (depth_filenames.size() != color_filenames.size()) {
+    	    utility::LogError(
+    	            "The number of depth images {} does not match the number of "
+    	            "color images {}.",
+    	            depth_filenames.size(), color_filenames.size());
+    	}
+    	std::sort(depth_filenames.begin(), depth_filenames.end());
+    	std::sort(color_filenames.begin(), color_filenames.end());
+
+    	std::vector<geometry::RGBDImage> rgbd_images;
+    	for (size_t i = 0; i < depth_filenames.size(); i++) {
+    	    utility::LogDebug("reading {}...", depth_filenames[i]);
+    	    auto depth = io::CreateImageFromFile(depth_filenames[i]);
+    	    utility::LogDebug("reading {}...", color_filenames[i]);
+    	    auto color = io::CreateImageFromFile(color_filenames[i]);
+    	    auto rgbd_image = geometry::RGBDImage::CreateFromColorAndDepth(
+    	            *color, *depth, 1000.0, 3.0, false);
+    	    rgbd_images.push_back(*rgbd_image);
+    	}
+		vvrgbd_image.push_bash(rgbd_images);
+	}
+	
+ 
 
     // Camera trajectory.
     camera::PinholeCameraTrajectory camera_trajectory;
@@ -80,7 +98,7 @@ PrepareDataset(const std::string& data_path) {
     geometry::TriangleMesh mesh;
     io::ReadTriangleMesh(data_path + "/scene/integrated.ply", mesh);
 
-    return std::make_tuple(mesh, rgbd_images, camera_trajectory);
+    return std::make_tuple(mesh, vvrgbd_image, camera_trajectory);
 }
 
 /// This is implementation of following paper
@@ -98,30 +116,15 @@ int main(int argc, char* argv[]) {
 
     // Read dataset.
     geometry::TriangleMesh mesh;
-    std::vector<geometry::RGBDImage> rgbd_images;
+    std::vector<std::vector<geometry::RGBDImage>> vvrgbd_image;
     camera::PinholeCameraTrajectory camera_trajectory;
-    std::tie(mesh, rgbd_images, camera_trajectory) = PrepareDataset(argv[1]);
-
-    // Save averaged color map (iteration=0).
-    pipelines::color_map::RigidOptimizerOption rigid_opt_option;
-    rigid_opt_option.maximum_iteration_ = 0;
-    std::tie(mesh, camera_trajectory) = pipelines::color_map::RunRigidOptimizer(
-            mesh, rgbd_images, camera_trajectory, rigid_opt_option);
-    io::WriteTriangleMesh("color_map_init.ply", mesh);
+    std::tie(mesh, vvrgbd_image, camera_trajectory) = PrepareDataset(argv[1]);
 
     // Run rigid optimization for 300 iterations.
     rigid_opt_option.maximum_iteration_ = 300;
-    std::tie(mesh, camera_trajectory) = pipelines::color_map::RunRigidOptimizer(
-            mesh, rgbd_images, camera_trajectory, rigid_opt_option);
+    std::tie(mesh, camera_trajectory) = pipelines::color_map::RunRigidOptimizerMultiCam(
+             mesh, vvrgbd_image, camera_trajectory, rigid_opt_option);
     io::WriteTriangleMesh("color_map_rigid_opt.ply", mesh);
-
-    // Run non-rigid optimization for 300 iterations.
-    pipelines::color_map::NonRigidOptimizerOption non_rigid_option;
-    non_rigid_option.maximum_iteration_ = 300;
-    std::tie(mesh, camera_trajectory) =
-            pipelines::color_map::RunNonRigidOptimizer(
-                    mesh, rgbd_images, camera_trajectory, non_rigid_option);
-    io::WriteTriangleMesh("color_map_non_rigid_opt.ply", mesh);
 
     return 0;
 }
