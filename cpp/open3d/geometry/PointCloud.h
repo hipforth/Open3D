@@ -335,7 +335,10 @@ public:
     std::vector<int> ClusterDBSCAN(double eps,
                                    size_t min_points,
                                    bool print_progress = false) const;
-
+    std::vector<int> ClusterDBSCAN(double eps,
+                                   size_t min_points,
+                                   const std::vector<Eigen::Vector3d>& seeds,
+                                   bool print_progress = false) const;
     /// \brief Segment PointCloud plane using the RANSAC algorithm.
     ///
     /// \param distance_threshold Max distance a point can be from the plane
