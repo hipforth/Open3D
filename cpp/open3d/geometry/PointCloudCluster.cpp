@@ -94,5 +94,48 @@ std::vector<int> PointCloud::ClusterDBSCAN(double eps,
     return labels;
 }
 
+std::vector<int> PointCloud::ClusterDBSCAN(double eps,
+                                           size_t min_points,
+                                           const std::vector<Eigen::Vector3d>& seeds, 
+                                           bool print_progress) const {
+    KDTreeFlann kdtree(*this);
+    std::vector<Eigen::Vector3d> pointseeds;
+    pointseeds.reserve(points_.size()+seeds.size());
+    pointseeds.insert(pointseeds.end(), seeds.begin(), seeds.end());
+    pointseeds.insert(pointseeds.end(), points_.begin(), points_.end());
+
+    // Precompute all neighbors.
+    utility::LogDebug("Precompute neighbors.");
+    utility::ProgressBar progress_bar(pointseeds.size(), "Precompute neighbors.",
+                                      print_progress);
+    std::vector<std::vector<int>> nbs(pointseeds.size());
+#pragma omp parallel for schedule(static) \
+        num_threads(utility::EstimateMaxThreads())
+    for (int idx = 0; idx < int(pointseeds.size()); ++idx) {
+        std::vector<double> dists2;
+        kdtree.SearchRadius(pointseeds[idx], eps, nbs[idx], dists2);
+
+#pragma omp critical(ClusterDBSCAN)
+        { ++progress_bar; }
+    }
+    utility::LogDebug("Done Precompute neighbors.");
+    int cluster_label = 0;
+    // Set all labels to undefined (-2).
+    std::vector<int> seed_labels(seeds.size(), cluster_label);
+    std::vector<int> point_labels(points_.size(), -2);
+    std::vector<int> labels;
+    labels.reserve(pointseeds.size());
+    labels.insert(labels.end(), seed_labels.begin(), seed_labels.end());
+    labels.insert(labels.end(), point_labels.begin(), point_labels.end());
+
+    for(size_t idx = 0; idx < seeds.size(); ++idx) {
+        for(const int& next_idx : nbs[idx]) {
+            labels[next_idx] = cluster_label;
+        }
+    }
+    utility::LogDebug("Done compute cluster.");
+    return labels;
+}
+
 }  // namespace geometry
 }  // namespace open3d
