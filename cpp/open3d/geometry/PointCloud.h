@@ -335,7 +335,7 @@ public:
                                    bool print_progress = false) const;
     std::vector<int> RegionGrowDBSCAN(double eps,
                                    size_t min_points,
-                                   const std::vector<Eigen::Vector3d>& seeds,
+                                   int seed_size,
                                    bool print_progress = false) const;
     /// \brief Segment PointCloud plane using the RANSAC algorithm.
     ///
@@ -452,6 +452,8 @@ public:
 public:
     /// Points coordinates.
     std::vector<Eigen::Vector3d> points_;
+    /// labels
+    std::vector<int> labels_;
     /// Points normals.
     std::vector<Eigen::Vector3d> normals_;
     /// RGB colors of points.

@@ -96,41 +96,68 @@ std::vector<int> PointCloud::ClusterDBSCAN(double eps,
 
 std::vector<int> PointCloud::RegionGrowDBSCAN(double eps,
                                            size_t min_points,
-                                           const std::vector<Eigen::Vector3d>& seeds, 
+                                           int seed_size, 
                                            bool print_progress) const {
     KDTreeFlann kdtree(*this);
-    std::vector<Eigen::Vector3d> pointseeds;
-    pointseeds.reserve(points_.size()+seeds.size());
-    pointseeds.insert(pointseeds.end(), seeds.begin(), seeds.end());
-    pointseeds.insert(pointseeds.end(), points_.begin(), points_.end());
 
     // Precompute all neighbors.
     utility::LogDebug("Precompute neighbors.");
-    utility::ProgressBar progress_bar(pointseeds.size(), "Precompute neighbors.",
+    utility::ProgressBar progress_bar(points_.size(), "Precompute neighbors.",
                                       print_progress);
-    std::vector<std::vector<int>> nbs(pointseeds.size());
+    std::vector<std::vector<int>> nbs(points_.size());
 #pragma omp parallel for schedule(static) \
         num_threads(utility::EstimateMaxThreads())
-    for (int idx = 0; idx < int(pointseeds.size()); ++idx) {
+    for (int idx = 0; idx < int(points_.size()); ++idx) {
         std::vector<double> dists2;
-        kdtree.SearchRadius(pointseeds[idx], eps, nbs[idx], dists2);
+        kdtree.SearchRadius(points_[idx], eps, nbs[idx], dists2);
 
-#pragma omp critical(ClusterDBSCAN)
+#pragma omp critical(RegionGrowDBSCAN)
         { ++progress_bar; }
     }
     utility::LogDebug("Done Precompute neighbors.");
     int cluster_label = 0;
     // Set all labels to undefined (-2).
-    std::vector<int> seed_labels(seeds.size(), cluster_label);
-    std::vector<int> point_labels(points_.size(), -2);
+    std::vector<int> seed_labels(seed_size, cluster_label);
+    std::vector<int> point_labels(points_.size()-seed_size, -2);
     std::vector<int> labels;
-    labels.reserve(pointseeds.size());
+    labels.reserve(points_.size());
     labels.insert(labels.end(), seed_labels.begin(), seed_labels.end());
     labels.insert(labels.end(), point_labels.begin(), point_labels.end());
 
-    for(size_t idx = 0; idx < seeds.size(); ++idx) {
-        for(const int& next_idx : nbs[idx]) {
-            labels[next_idx] = cluster_label;
+    for(int idx = 0; idx < seed_size; ++idx) {
+        // for(const int& next_idx : nbs[idx]) {
+        //     labels[next_idx] = cluster_label;
+        // }
+
+        std::unordered_set<int> nbs_next(nbs[idx].begin(), nbs[idx].end());
+        std::unordered_set<int> nbs_visited;
+        nbs_visited.insert(int(idx));
+        ++progress_bar;
+        while (!nbs_next.empty()) {
+            int nb = *nbs_next.begin();
+            nbs_next.erase(nbs_next.begin());
+            nbs_visited.insert(nb);
+
+            // Noise label.
+            if (labels[nb] == -1) {
+                labels[nb] = cluster_label;
+                ++progress_bar;
+            }
+
+            // Not undefined label.
+            if (labels[nb] != -2) {
+                continue;
+            }
+            labels[nb] = cluster_label;
+            ++progress_bar;
+
+            if (nbs[nb].size() >= min_points) {
+                for (int qnb : nbs[nb]) {
+                    if (nbs_visited.count(qnb) == 0) {
+                        nbs_next.insert(qnb);
+                    }
+                }
+            }
         }
     }
     utility::LogDebug("Done compute cluster.");
