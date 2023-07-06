@@ -94,7 +94,7 @@ std::vector<int> PointCloud::ClusterDBSCAN(double eps,
     return labels;
 }
 
-std::vector<int> PointCloud::ClusterDBSCAN(double eps,
+std::vector<int> PointCloud::RegionGrowDBSCAN(double eps,
                                            size_t min_points,
                                            const std::vector<Eigen::Vector3d>& seeds, 
                                            bool print_progress) const {

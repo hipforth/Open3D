@@ -333,7 +333,7 @@ public:
     std::vector<int> ClusterDBSCAN(double eps,
                                    size_t min_points,
                                    bool print_progress = false) const;
-    std::vector<int> ClusterDBSCAN(double eps,
+    std::vector<int> RegionGrowDBSCAN(double eps,
                                    size_t min_points,
                                    const std::vector<Eigen::Vector3d>& seeds,
                                    bool print_progress = false) const;
