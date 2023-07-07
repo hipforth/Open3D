@@ -57,11 +57,11 @@ void DBSCANGrow(
     seedpoints.insert(seedpoints.end(), points.begin(), points.end());
 
     int seed_size = int(iniseeds.size());
-    const double eps = 0.35;
+    const double eps = 0.15;
     int min_points = int(iniseeds.size()/4);
     open3d::geometry::PointCloud pointcloud;
     pointcloud.points_ = seedpoints;
-    std::vector<int> labels = pointcloud.RegionGrowDBSCAN(eps, min_points, seed_size, true);
+    std::vector<int> labels = pointcloud.RegionGrowDBSCAN(eps, min_points, seed_size, false);
 
     for(size_t idx = 0; idx < labels.size(); ++idx) {
         if(labels[idx] == 0) semantic_points.emplace_back(seedpoints[idx]);
@@ -134,6 +134,7 @@ int main(int argc, char* argv[]) {
         auto pointcloud = io::CreatePointCloudFromFile(pcd_file);
         processSemanticCloud(0.35, pointcloud);
         io::WritePointCloud(out_file, *pointcloud);
+        std::cout << out_file << std::endl;
     }
 
     return 0;
